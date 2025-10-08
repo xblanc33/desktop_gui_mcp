@@ -1,0 +1,26 @@
+[project]
+name = "desktop-gui-mcp"
+version = "0.1.0"
+description = "A Model Context Protocol server exposing desktop automation utilities."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "mcp>=0.1.1",
+    "pyautogui>=0.9.54",
+    "pillow>=10.0.0",
+    "pyscreeze>=0.1.30",
+]
+
+[project.optional-dependencies]
+dev = [
+    "ruff>=0.5.0",
+    "mypy>=1.8.0",
+    "types-PyAutoGUI>=0.9.0.20240218",
+]
+
+[project.scripts]
+desktop-gui-mcp = "desktop_gui_mcp.__main__:main"
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
