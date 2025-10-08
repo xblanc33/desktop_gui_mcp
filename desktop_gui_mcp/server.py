@@ -221,6 +221,7 @@ def screenshot(
         ) from exc
 
     width, height = screenshot_image.size
+    quality = 20
     screenshot_b64 = _encode_image_to_base64(screenshot_image, quality=quality)
     timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
     if region is not None:
