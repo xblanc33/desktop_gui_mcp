@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import base64
 import os
+import sys
+import time
 from datetime import datetime
 from io import BytesIO
 from typing import Annotated, Literal, Optional, Sequence, TypedDict
@@ -99,6 +101,65 @@ def _normalize_region(
     return left, top, width, height
 
 
+_COMMAND_OR_CONTROL_KEY = "command" if sys.platform == "darwin" else "ctrl"
+
+# Map common user-facing key names to the canonical values expected by pyautogui.
+_KEY_ALIASES = {
+    "cmd": "command",
+    "commandorcontrol": _COMMAND_OR_CONTROL_KEY,
+    "control": "ctrl",
+    "spacebar": "space",
+    "return": "enter",
+    "escape": "esc",
+    "windows": "win",
+    "meta": "command" if sys.platform == "darwin" else "win",
+}
+
+# pyautogui exposes the available key names for the current platform; use them to validate input.
+_VALID_KEYS = set(getattr(pyautogui, "KEYBOARD_KEYS", []))
+
+
+def _normalize_key_name(key: str) -> str:
+    if not isinstance(key, str):
+        raise TypeError("Key names must be strings.")
+
+    if key == " ":
+        normalized_key = "space"
+    else:
+        stripped = key.strip()
+        if not stripped:
+            raise ValueError("Key names must not be empty.")
+        normalized_key = stripped.lower()
+        normalized_key = _KEY_ALIASES.get(normalized_key, normalized_key)
+
+    if _VALID_KEYS and normalized_key not in _VALID_KEYS:
+        raise ValueError(f"Unsupported key for this platform: {normalized_key}")
+
+    return normalized_key
+
+
+def _normalize_keys(keys: Sequence[str]) -> list[str]:
+    return [_normalize_key_name(key) for key in keys]
+
+
+def _press_hotkey(keys: Sequence[str], interval: float) -> None:
+    if len(keys) == 1:
+        pyautogui.press(keys[0])
+        return
+
+    sleep_interval = interval if interval > 0 else max(0.02, pyautogui.PAUSE)
+    pressed_keys: list[str] = []
+    try:
+        for key in keys:
+            pyautogui.keyDown(key)
+            pressed_keys.append(key)
+            time.sleep(sleep_interval)
+    finally:
+        for key in reversed(pressed_keys):
+            pyautogui.keyUp(key)
+            time.sleep(sleep_interval)
+
+
 @mcp_server.tool(name="desktop_move_mouse")
 def move_mouse(
     x: Annotated[float, "X screen coordinate in pixels"],
@@ -179,12 +240,14 @@ def press_keys(
     if not keys:
         raise ValueError("The keys list must not be empty.")
 
+    normalized_keys = _normalize_keys(keys)
+
     if as_hotkey:
-        pyautogui.hotkey(*keys, interval=interval)
-        summary = f"Pressed hotkey combination: {' + '.join(keys)}."
+        _press_hotkey(normalized_keys, interval)
+        summary = f"Pressed hotkey combination: {' + '.join(normalized_keys)}."
     else:
-        pyautogui.press(keys, interval=interval)
-        summary = f"Pressed keys sequentially: {', '.join(keys)}."
+        pyautogui.press(normalized_keys, interval=interval)
+        summary = f"Pressed keys sequentially: {', '.join(normalized_keys)}."
 
     return _build_response(summary)
 
