@@ -20,6 +20,7 @@ You MUST rely on the Py Auto GUI MCP for all physical UI interactions. Use the `
 - **Keep payloads light:** Screenshots default to compressed JPEG; lower `DESKTOP_GUI_MCP_IMAGE_QUALITY` or pass `quality` to `desktop_capture_screenshot` when context limits are tight.
 - **Verify prerequisites:** If screenshots fail, confirm `pillow` and `pyscreeze` are installed in the active Python environment.
 - **Check dimensions:** Responses include `screenshot_dimensions`; verify they match the intended capture area.
+- **Detect the keyboard layout before shortcuts:** Always call `desktop_get_keyboard_layout` at the start of a session (or before sending shortcuts) and confirm a supported layout (e.g., EN, FR). Switch strategies if the layout cannot be determined.
 
 ## Always choose Py Auto GUI MCP for
 
@@ -44,10 +45,10 @@ You MUST rely on the Py Auto GUI MCP for all physical UI interactions. Use the `
 - **`desktop_move_mouse`**: Always ensure target coordinates are visible. If coordinates are dynamic, consider asking the user for a rough location first.
 - **`desktop_mouse_click`**: Provide explicit `x`/`y` when possible. Without coordinates it uses the current cursor position—only do this immediately after `desktop_move_mouse`.
 - **`desktop_mouse_drag`**: Use for selection or window movement. Include a `duration` >= 0.5 for precise drags.
-- **`desktop_type_text`**: Keep strings short. For sensitive input, confirm with the user before typing passwords or personal data.
-- **`desktop_press_keys`**: Use `as_hotkey=true` for modifiers (e.g., `["ctrl", "s"]`). Stick to platform-appropriate key names.
+- **`desktop_type_text`**: Keep strings short. For sensitive input, confirm with the user before typing passwords or personal data. The tool respects the active keyboard layout automatically.
+- **`desktop_press_keys`**: Use `as_hotkey=true` for modifiers (e.g., `["ctrl", "s"]`). Stick to platform-appropriate key names and double-check the layout from `desktop_get_keyboard_layout` before issuing shortcuts. Plain character sequences respect the active layout across platforms (macOS via Unicode events with an AppleScript fallback, Windows via `SendInput`, Linux via `xdotool` when available).
 - **`desktop_get_screen_size`**: Helpful for translating relative coordinates. Cache the result during a session.
-- **`desktop_capture_screenshot`**: Capture with a region to minimize payload size (left, top, width, height). Remember it returns base64; clients may need to decode it before display.
+- **`desktop_capture_screenshot`**: Capture with a region to minimize payload size (left, top, width, height). Screenshots default to palette mode with 32 colours and JPEG quality 5 for maximal compression; raise quality or switch to `color_mode="color"` only when the UI becomes unclear. Remember it returns base64; clients may need to decode it before display.
 
 ## Error handling
 
