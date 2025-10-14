@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import base64
+import json
+import logging
 import os
 import plistlib
 import shutil
@@ -11,9 +13,16 @@ import sys
 import time
 from datetime import datetime
 from io import BytesIO
+from pathlib import Path
 from typing import Annotated, Literal, Optional, Sequence, TypedDict
 
 from PIL import Image
+
+try:
+    from dotenv import load_dotenv
+except ModuleNotFoundError:  # pragma: no cover - optional dependency guard
+    def load_dotenv(*_args, **_kwargs):  # type: ignore[empty-body]
+        return False
 
 if sys.platform == "darwin":
     try:
@@ -30,6 +39,7 @@ SERVER_NAME = "desktop-gui-mcp"
 ENV_PREFIX = "DESKTOP_GUI_MCP"
 SCREENSHOT_FORMAT = "JPEG"
 
+load_dotenv()
 
 def _get_env_var(name: str, default: Optional[str] = None) -> Optional[str]:
     """Fetch an environment variable using the Desktop GUI MCP prefix."""
@@ -78,6 +88,33 @@ if _default_palette_size_raw is not None:
 else:
     _default_palette_size = 32
 
+
+def _parse_bool(value: Optional[str]) -> bool:
+    if value is None:
+        return False
+    return value.lower() in {"1", "true", "yes", "on"}
+
+
+_debug_enabled = _parse_bool(_get_env_var("DEBUG"))
+_debug_dir: Optional[Path] = None
+_logger = logging.getLogger("desktop_gui_mcp")
+if not _logger.handlers:
+    _logger.addHandler(logging.NullHandler())
+
+if _debug_enabled:
+    debug_dir_raw = _get_env_var("DEBUG_DIR") or os.path.join(
+        os.getcwd(), "desktop_gui_mcp_debug"
+    )
+    _debug_dir = Path(debug_dir_raw).expanduser()
+    _debug_dir.mkdir(parents=True, exist_ok=True)
+    log_path = _debug_dir / f"trace-{datetime.utcnow().strftime('%Y%m%d-%H%M%S')}.log"
+    handler = logging.FileHandler(log_path, encoding="utf-8")
+    handler.setFormatter(logging.Formatter("%(asctime)sZ %(message)s"))
+    _logger.addHandler(handler)
+    _logger.setLevel(logging.DEBUG)
+    _logger.propagate = False
+    _logger.debug("Debug logging enabled. Writing to %s", log_path)
+
 mcp_server = FastMCP(SERVER_NAME)
 
 
@@ -86,6 +123,84 @@ class ToolResponse(TypedDict):
     summary: str
     screenshot: Optional[str]
     screenshot_dimensions: Optional[tuple[int, int]]
+
+def _debug_log(message: str) -> None:
+    if _debug_enabled:
+        _logger.debug(message)
+
+
+def _serialize_for_log(data) -> str:
+    try:
+        return json.dumps(data, default=str, ensure_ascii=False)
+    except TypeError:
+        return repr(data)
+
+
+def _truncate_text(value: str, limit: int = 200) -> str:
+    if len(value) <= limit:
+        return value
+    remainder = len(value) - limit
+    return f"{value[:limit]}…(+{remainder} chars)"
+
+
+class _NoopDebugContext:
+    def __enter__(self):
+        return self
+
+    def finish(self, response):
+        return response
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+
+class _ActiveDebugContext:
+    def __init__(self, name: str, payload):
+        self.name = name
+        self.payload = payload
+
+    def __enter__(self):
+        _debug_log(f"{self.name} request={_serialize_for_log(self.payload)}")
+        return self
+
+    def finish(self, response):
+        _debug_log(f"{self.name} response={_serialize_for_log(response)}")
+        return response
+
+    def __exit__(self, exc_type, exc, tb):
+        if exc_type is not None:
+            _debug_log(f"{self.name} error={repr(exc)}")
+        return False
+
+
+def _tool_debug_context(name: str, payload) -> _NoopDebugContext | _ActiveDebugContext:
+    if not _debug_enabled:
+        return _NoopDebugContext()
+    return _ActiveDebugContext(name, payload)
+
+
+def _debug_store_screenshot(
+    base64_data: Optional[str],
+    tool_name: str,
+    *,
+    metadata: dict,
+) -> None:
+    if not (_debug_enabled and base64_data and _debug_dir is not None):
+        return
+
+    timestamp = datetime.utcnow().strftime("%Y%m%d-%H%M%S-%f")
+    prefix = f"{tool_name}-{timestamp}"
+
+    image_path = _debug_dir / f"{prefix}.jpg"
+    image_bytes = base64.b64decode(base64_data.encode("ascii"))
+    image_path.write_bytes(image_bytes)
+
+    base64_path = _debug_dir / f"{prefix}.b64"
+    base64_path.write_text(base64_data, encoding="ascii")
+
+    _debug_log(
+        f"{tool_name} screenshot saved image={image_path} base64={base64_path} metadata={_serialize_for_log(metadata)}"
+    )
 
 
 def _apply_color_mode(
@@ -528,9 +643,12 @@ def move_mouse(
 ) -> ToolResponse:
     """Move the mouse cursor to an absolute position."""
 
-    pyautogui.moveTo(x, y, duration=duration)
-    summary = f"Moved cursor to ({x:.1f}, {y:.1f}) over {duration:.2f}s."
-    return _build_response(summary)
+    with _tool_debug_context(
+        "desktop_move_mouse", {"x": x, "y": y, "duration": duration}
+    ) as debug_ctx:
+        pyautogui.moveTo(x, y, duration=duration)
+        summary = f"Moved cursor to ({x:.1f}, {y:.1f}) over {duration:.2f}s."
+        return debug_ctx.finish(_build_response(summary))
 
 
 @mcp_server.tool(name="desktop_mouse_click")
@@ -543,14 +661,22 @@ def click(
 ) -> ToolResponse:
     """Perform a mouse click (or multiple clicks)."""
 
-    pyautogui.click(x=x, y=y, clicks=clicks, interval=interval, button=button)
-    if x is not None and y is not None:
-        position_str = f" at ({x:.1f}, {y:.1f})"
-    else:
-        position_str = ""
-    plural = "s" if clicks != 1 else ""
-    summary = f"Clicked {button} button{position_str} {clicks} time{plural}."
-    return _build_response(summary)
+    payload = {
+        "x": x,
+        "y": y,
+        "button": button,
+        "clicks": clicks,
+        "interval": interval,
+    }
+    with _tool_debug_context("desktop_mouse_click", payload) as debug_ctx:
+        pyautogui.click(x=x, y=y, clicks=clicks, interval=interval, button=button)
+        if x is not None and y is not None:
+            position_str = f" at ({x:.1f}, {y:.1f})"
+        else:
+            position_str = ""
+        plural = "s" if clicks != 1 else ""
+        summary = f"Clicked {button} button{position_str} {clicks} time{plural}."
+        return debug_ctx.finish(_build_response(summary))
 
 
 @mcp_server.tool(name="desktop_mouse_drag")
@@ -564,12 +690,21 @@ def drag(
 ) -> ToolResponse:
     """Drag the mouse from the start coordinates to the end coordinates."""
 
-    if start_x is not None and start_y is not None:
-        pyautogui.moveTo(start_x, start_y)
+    payload = {
+        "start_x": start_x,
+        "start_y": start_y,
+        "end_x": end_x,
+        "end_y": end_y,
+        "duration": duration,
+        "button": button,
+    }
+    with _tool_debug_context("desktop_mouse_drag", payload) as debug_ctx:
+        if start_x is not None and start_y is not None:
+            pyautogui.moveTo(start_x, start_y)
 
-    pyautogui.dragTo(end_x, end_y, duration=duration, button=button)
-    summary = f"Dragged {button} button to ({end_x:.1f}, {end_y:.1f}) over {duration:.2f}s."
-    return _build_response(summary)
+        pyautogui.dragTo(end_x, end_y, duration=duration, button=button)
+        summary = f"Dragged {button} button to ({end_x:.1f}, {end_y:.1f}) over {duration:.2f}s."
+        return debug_ctx.finish(_build_response(summary))
 
 
 @mcp_server.tool(name="desktop_type_text")
@@ -580,11 +715,17 @@ def type_text(
 ) -> ToolResponse:
     """Type the given text using the keyboard."""
 
-    _type_text_with_layout_awareness(text, interval)
-    if press_enter:
-        pyautogui.press("enter")
-    summary = "Typed text{}.".format(" and pressed enter" if press_enter else "")
-    return _build_response(summary)
+    payload = {
+        "text": _truncate_text(text),
+        "interval": interval,
+        "press_enter": press_enter,
+    }
+    with _tool_debug_context("desktop_type_text", payload) as debug_ctx:
+        _type_text_with_layout_awareness(text, interval)
+        if press_enter:
+            pyautogui.press("enter")
+        summary = "Typed text{}.".format(" and pressed enter" if press_enter else "")
+        return debug_ctx.finish(_build_response(summary))
 
 
 @mcp_server.tool(name="desktop_press_keys")
@@ -602,44 +743,54 @@ def press_keys(
 
     normalized_keys = _normalize_keys(keys)
 
-    if as_hotkey:
-        _press_hotkey(normalized_keys, interval)
-        summary = f"Pressed hotkey combination: {' + '.join(normalized_keys)}."
-    else:
-        text_value = _keys_to_text(normalized_keys)
-        if text_value is not None:
-            _type_text_with_layout_awareness(text_value, interval)
-            summary = f"Typed text: {text_value!r}."
+    payload = {
+        "keys": keys,
+        "as_hotkey": as_hotkey,
+        "interval": interval,
+    }
+    with _tool_debug_context("desktop_press_keys", payload) as debug_ctx:
+        if as_hotkey:
+            _press_hotkey(normalized_keys, interval)
+            summary = f"Pressed hotkey combination: {' + '.join(normalized_keys)}."
         else:
-            pyautogui.press(normalized_keys, interval=interval)
-            summary = f"Pressed keys sequentially: {', '.join(normalized_keys)}."
+            text_value = _keys_to_text(normalized_keys)
+            if text_value is not None:
+                _type_text_with_layout_awareness(text_value, interval)
+                summary = f"Typed text: {text_value!r}."
+            else:
+                pyautogui.press(normalized_keys, interval=interval)
+                summary = f"Pressed keys sequentially: {', '.join(normalized_keys)}."
 
-    return _build_response(summary)
+        return debug_ctx.finish(_build_response(summary))
 
 
 @mcp_server.tool(name="desktop_get_keyboard_layout")
 def get_keyboard_layout() -> ToolResponse:
     """Attempt to identify the active keyboard layout."""
 
-    layout_info = _detect_keyboard_layout()
-    if layout_info is None:
-        return _build_response(
-            "Unable to determine the active keyboard layout on this platform.",
-            status="error",
-        )
+    with _tool_debug_context("desktop_get_keyboard_layout", {}) as debug_ctx:
+        layout_info = _detect_keyboard_layout()
+        if layout_info is None:
+            return debug_ctx.finish(
+                _build_response(
+                    "Unable to determine the active keyboard layout on this platform.",
+                    status="error",
+                )
+            )
 
-    detail_parts = [f"{key}={value}" for key, value in layout_info.items() if value]
-    summary = "Keyboard layout detected: {}".format("; ".join(detail_parts))
-    return _build_response(summary)
+        detail_parts = [f"{key}={value}" for key, value in layout_info.items() if value]
+        summary = "Keyboard layout detected: {}".format("; ".join(detail_parts))
+        return debug_ctx.finish(_build_response(summary))
 
 
 @mcp_server.tool(name="desktop_get_screen_size")
 def get_screen_size() -> ToolResponse:
     """Return the width and height of the primary screen."""
 
-    width, height = pyautogui.size()
-    summary = f"Screen size: {width}x{height}"
-    return _build_response(summary)
+    with _tool_debug_context("desktop_get_screen_size", {}) as debug_ctx:
+        width, height = pyautogui.size()
+        summary = f"Screen size: {width}x{height}"
+        return debug_ctx.finish(_build_response(summary))
 
 
 @mcp_server.tool(name="desktop_capture_screenshot")
@@ -663,51 +814,78 @@ def screenshot(
 ) -> ToolResponse:
     """Capture a screenshot and return its base64 representation along with the image dimensions."""
 
-    normalized_region = _normalize_region(region)
-    try:
-        screenshot_image = pyautogui.screenshot(region=normalized_region)
-    except Exception as exc:  # noqa: BLE001
-        raise RuntimeError(
-            "Unable to capture a screenshot. Ensure Pillow and PyScreeze are installed "
-            "(try `pip install pillow pyscreeze`)."
-        ) from exc
+    payload = {
+        "region": list(region) if region is not None else None,
+        "quality": quality,
+        "color_mode": color_mode,
+        "palette_size": palette_size,
+    }
+    with _tool_debug_context("desktop_capture_screenshot", payload) as debug_ctx:
+        normalized_region = _normalize_region(region)
+        try:
+            screenshot_image = pyautogui.screenshot(region=normalized_region)
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError(
+                "Unable to capture a screenshot. Ensure Pillow and PyScreeze are installed "
+                "(try `pip install pillow pyscreeze`)."
+            ) from exc
 
-    screenshot_width, screenshot_height = screenshot_image.size
-    mode_to_use = (color_mode or _default_color_mode).lower()
-    quality_to_use = quality if quality is not None else _default_image_quality
-    palette_to_use = palette_size
+        screenshot_width, screenshot_height = screenshot_image.size
+        mode_to_use = (color_mode or _default_color_mode).lower()
+        quality_to_use = quality if quality is not None else _default_image_quality
+        palette_to_use = palette_size
 
-    screenshot_b64 = _encode_image_to_base64(
-        screenshot_image,
-        quality=quality_to_use,
-        color_mode=mode_to_use,
-        palette_size=palette_to_use,
-    )
-    timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+        screenshot_b64 = _encode_image_to_base64(
+            screenshot_image,
+            quality=quality_to_use,
+            color_mode=mode_to_use,
+            palette_size=palette_to_use,
+        )
+        timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
 
-    summary_parts: list[str] = []
-    if region is not None:
-        left, top, width, height = normalized_region
-        summary_parts.append(f"region=({left}, {top}, {width}, {height})")
+        summary_parts: list[str] = []
+        if region is not None:
+            left, top, width, height = normalized_region
+            summary_parts.append(f"region=({left}, {top}, {width}, {height})")
 
-    summary_parts.append(f"mode={mode_to_use}")
-    summary_parts.append(f"quality={max(5, min(95, int(quality_to_use)))}")
-    if mode_to_use == "palette":
-        palette_detail = palette_size if palette_size is not None else _default_palette_size
-        summary_parts.append(f"palette={palette_detail}")
+        quality_logged = max(5, min(95, int(quality_to_use)))
+        summary_parts.append(f"mode={mode_to_use}")
+        summary_parts.append(f"quality={quality_logged}")
+        if mode_to_use == "palette":
+            palette_detail = palette_size if palette_size is not None else _default_palette_size
+            summary_parts.append(f"palette={palette_detail}")
 
-    details_str = "; ".join(summary_parts)
-    summary = f"Captured screenshot at {timestamp}"
-    if details_str:
-        summary += f"; {details_str}."
-    else:
-        summary += "."
+        details_str = "; ".join(summary_parts)
+        summary = f"Captured screenshot at {timestamp}"
+        if details_str:
+            summary += f"; {details_str}."
+        else:
+            summary += "."
 
-    return _build_response(
-        summary,
-        screenshot_b64=screenshot_b64,
-        dimensions=(screenshot_width, screenshot_height),
-    )
+        response = _build_response(
+            summary,
+            screenshot_b64=screenshot_b64,
+            dimensions=(screenshot_width, screenshot_height),
+        )
+
+        _debug_store_screenshot(
+            response["screenshot"],
+            "desktop_capture_screenshot",
+            metadata={
+                "width": screenshot_width,
+                "height": screenshot_height,
+                "mode": mode_to_use,
+                "quality": quality_logged,
+                "palette": (
+                    palette_size if palette_size is not None else _default_palette_size
+                )
+                if mode_to_use == "palette"
+                else None,
+                "region": normalized_region,
+            },
+        )
+
+        return debug_ctx.finish(response)
 
 
 def run_server() -> None:

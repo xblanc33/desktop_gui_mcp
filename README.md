@@ -154,6 +154,10 @@ Screenshots default to the most aggressive compression settings (palette mode wi
 
 These controls can be mixed—for example, `color_mode="color", quality=20`—to balance clarity and token footprint while preserving the original width and height.
 
+## Debug mode
+
+Set `DESKTOP_GUI_MCP_DEBUG=1` to capture a persistent trace of every tool call. When enabled, the server writes a timestamped log (and, for `desktop_capture_screenshot`, the JPEG and corresponding base64 payload) to `DESKTOP_GUI_MCP_DEBUG_DIR` (default `./desktop_gui_mcp_debug`). This is invaluable when auditing agent behaviour or replaying UI flows; remember to disable it once you finish debugging to avoid collecting unnecessary artifacts.
+
 ## Configuration
 
 Runtime settings can be supplied via environment variables:
@@ -163,6 +167,10 @@ Runtime settings can be supplied via environment variables:
 - `DESKTOP_GUI_MCP_IMAGE_QUALITY`: JPEG quality (1-95, defaults to 5) for screenshot compression; raise it only when you need extra detail.
 - `DESKTOP_GUI_MCP_SCREENSHOT_COLOR_MODE`: `color`, `gray`, or `palette` (default `palette`). Use `color` for full-fidelity captures or `gray` for luminance-only output.
 - `DESKTOP_GUI_MCP_SCREENSHOT_PALETTE_SIZE`: Palette size (2-256, default 32) used when the color mode is `palette`.
+- `DESKTOP_GUI_MCP_DEBUG`: Set to `1`/`true` to enable request tracing and artifact capture.
+- `DESKTOP_GUI_MCP_DEBUG_DIR`: Directory for debug traces and persisted screenshots (defaults to `./desktop_gui_mcp_debug`).
+
+Environment overrides can also be placed in a project-local `.env` file, which the server loads automatically on startup.
 
 The server still honors the previous `PY_AUTO_GUI_MCP_*` names for backward compatibility, but these will be removed in a future release.
 

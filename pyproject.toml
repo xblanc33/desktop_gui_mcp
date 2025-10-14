@@ -9,6 +9,7 @@ dependencies = [
     "pyautogui>=0.9.54",
     "pillow>=10.0.0",
     "pyscreeze>=0.1.30",
+    "python-dotenv>=1.0.0",
 ]
 
 [project.optional-dependencies]
