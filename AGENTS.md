@@ -17,7 +17,6 @@ You MUST rely on the Py Auto GUI MCP for all physical UI interactions. Use the `
 - **Leverage summaries:** Every tool returns `status` and `summary`, and the screenshot tool adds base64 image data. Check `status` before chaining dependent actions.
 - **Take mandatory screenshots:** After meaningful actions, follow up with the `desktop_capture_screenshot` tool to confirm the UI state before proceeding.
 - **Avoid rapid loops:** PyAutoGUI runs client-side; high-frequency loops can freeze the UI. Insert pauses or rely on PyAutoGUI’s global `PAUSE`.
-- **Keep payloads light:** Screenshots default to compressed JPEG; lower `DESKTOP_GUI_MCP_IMAGE_QUALITY` or pass `quality` to `desktop_capture_screenshot` when context limits are tight.
 - **Verify prerequisites:** If screenshots fail, confirm `pillow` and `pyscreeze` are installed in the active Python environment.
 - **Check dimensions:** Responses include `screenshot_dimensions`; verify they match the intended capture area.
 - **Detect the keyboard layout before shortcuts:** Always call `desktop_get_keyboard_layout` at the start of a session (or before sending shortcuts) and confirm a supported layout (e.g., EN, FR). Switch strategies if the layout cannot be determined.
@@ -48,7 +47,7 @@ You MUST rely on the Py Auto GUI MCP for all physical UI interactions. Use the `
 - **`desktop_type_text`**: Keep strings short. For sensitive input, confirm with the user before typing passwords or personal data. The tool respects the active keyboard layout automatically.
 - **`desktop_press_keys`**: Use `as_hotkey=true` for modifiers (e.g., `["ctrl", "s"]`). Stick to platform-appropriate key names and double-check the layout from `desktop_get_keyboard_layout` before issuing shortcuts. Plain character sequences respect the active layout across platforms (macOS via Unicode events with an AppleScript fallback, Windows via `SendInput`, Linux via `xdotool` when available).
 - **`desktop_get_screen_size`**: Helpful for translating relative coordinates. Cache the result during a session.
-- **`desktop_capture_screenshot`**: Capture with a region to minimize payload size (left, top, width, height). Screenshots default to palette mode with 32 colours and JPEG quality 5 for maximal compression; raise quality or switch to `color_mode="color"` only when the UI becomes unclear. Remember it returns base64; clients may need to decode it before display.
+- **`desktop_capture_screenshot`**: Capture a full-screen image. Retina captures are automatically scaled down to the logical screen size. Remember it returns a base64 data URL; clients may need to decode it before display.
 
 ## Error handling
 

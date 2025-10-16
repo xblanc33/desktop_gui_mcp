@@ -24,6 +24,9 @@ except ModuleNotFoundError:  # pragma: no cover - optional dependency guard
     def load_dotenv(*_args, **_kwargs):  # type: ignore[empty-body]
         return False
 
+PACKAGE_ROOT = Path(__file__).resolve().parent
+PROJECT_ROOT = PACKAGE_ROOT.parent
+
 if sys.platform == "darwin":
     try:
         import Quartz  # type: ignore[import-not-found]
@@ -40,6 +43,7 @@ ENV_PREFIX = "DESKTOP_GUI_MCP"
 SCREENSHOT_FORMAT = "JPEG"
 
 load_dotenv()
+load_dotenv(dotenv_path=PROJECT_ROOT / ".env", override=False)
 
 def _get_env_var(name: str, default: Optional[str] = None) -> Optional[str]:
     """Fetch an environment variable using the Desktop GUI MCP prefix."""
@@ -105,7 +109,7 @@ if _debug_enabled:
     debug_dir_raw = _get_env_var("DEBUG_DIR") or os.path.join(
         os.getcwd(), "desktop_gui_mcp_debug"
     )
-    _debug_dir = Path(debug_dir_raw).expanduser()
+    _debug_dir = Path(debug_dir_raw).expanduser().resolve()
     _debug_dir.mkdir(parents=True, exist_ok=True)
     log_path = _debug_dir / f"trace-{datetime.utcnow().strftime('%Y%m%d-%H%M%S')}.log"
     handler = logging.FileHandler(log_path, encoding="utf-8")
@@ -147,7 +151,7 @@ class _NoopDebugContext:
     def __enter__(self):
         return self
 
-    def finish(self, response):
+    def finish(self, response, *, metadata: Optional[dict] = None):
         return response
 
     def __exit__(self, exc_type, exc, tb):
@@ -163,8 +167,22 @@ class _ActiveDebugContext:
         _debug_log(f"{self.name} request={_serialize_for_log(self.payload)}")
         return self
 
-    def finish(self, response):
+    def finish(self, response, *, metadata: Optional[dict] = None):
         _debug_log(f"{self.name} response={_serialize_for_log(response)}")
+        if _debug_enabled and isinstance(response, dict):
+            screenshot_data = response.get("screenshot")
+            if isinstance(screenshot_data, str) and screenshot_data:
+                combined_metadata = {
+                    "summary": response.get("summary"),
+                    "dimensions": response.get("screenshot_dimensions"),
+                }
+                if metadata:
+                    combined_metadata.update(metadata)
+                _debug_store_screenshot(
+                    screenshot_data,
+                    self.name,
+                    metadata=combined_metadata,
+                )
         return response
 
     def __exit__(self, exc_type, exc, tb):
@@ -192,15 +210,30 @@ def _debug_store_screenshot(
     prefix = f"{tool_name}-{timestamp}"
 
     image_path = _debug_dir / f"{prefix}.jpg"
-    image_bytes = base64.b64decode(base64_data.encode("ascii"))
-    image_path.write_bytes(image_bytes)
-
     base64_path = _debug_dir / f"{prefix}.b64"
-    base64_path.write_text(base64_data, encoding="ascii")
 
-    _debug_log(
-        f"{tool_name} screenshot saved image={image_path} base64={base64_path} metadata={_serialize_for_log(metadata)}"
-    )
+    try:
+        base64_path.write_text(base64_data, encoding="ascii")
+    except Exception as exc:  # noqa: BLE001
+        _debug_log(f"{tool_name} failed to write base64 file {base64_path}: {exc!r}")
+    try:
+        raw_data = base64_data
+        if raw_data.startswith("data:"):
+            raw_data = raw_data.split(",", 1)[-1]
+        normalized = raw_data.encode("ascii")
+        missing_padding = (-len(normalized)) % 4
+        if missing_padding:
+            normalized += b"=" * missing_padding
+        image_bytes = base64.b64decode(normalized, validate=False)
+        image_path.write_bytes(image_bytes)
+    except Exception as exc:  # noqa: BLE001
+        _debug_log(
+            f"{tool_name} failed to decode screenshot base64 into {image_path}: {exc!r}"
+        )
+    else:
+        _debug_log(
+            f"{tool_name} screenshot saved image={image_path} base64={base64_path} metadata={_serialize_for_log(metadata)}"
+        )
 
 
 def _apply_color_mode(
@@ -247,7 +280,8 @@ def _encode_image_to_base64(
 
     buffer = BytesIO()
     image_to_save.save(buffer, format=SCREENSHOT_FORMAT, **save_kwargs)
-    return base64.b64encode(buffer.getvalue()).decode("ascii")
+    encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+    return f"data:image/{SCREENSHOT_FORMAT.lower()};base64,{encoded}"
 
 
 def _build_response(
@@ -263,17 +297,6 @@ def _build_response(
         screenshot=screenshot_b64,
         screenshot_dimensions=dimensions,
     )
-
-
-def _normalize_region(
-    region: Optional[Sequence[int]],
-) -> Optional[tuple[int, int, int, int]]:
-    if region is None:
-        return None
-    if len(region) != 4:
-        raise ValueError("Region must contain exactly four integers: left, top, width, height.")
-    left, top, width, height = (int(value) for value in region)
-    return left, top, width, height
 
 
 _COMMAND_OR_CONTROL_KEY = "command" if sys.platform == "darwin" else "ctrl"
@@ -308,6 +331,8 @@ def _normalize_key_name(key: str) -> str:
         normalized_key = _KEY_ALIASES.get(normalized_key, normalized_key)
 
     if _VALID_KEYS and normalized_key not in _VALID_KEYS:
+        if len(normalized_key) == 1:
+            return normalized_key
         raise ValueError(f"Unsupported key for this platform: {normalized_key}")
 
     return normalized_key
@@ -794,46 +819,30 @@ def get_screen_size() -> ToolResponse:
 
 
 @mcp_server.tool(name="desktop_capture_screenshot")
-def screenshot(
-    region: Annotated[
-        Optional[Sequence[int]],
-        "Optional region as [left, top, width, height]. Default captures full screen.",
-    ] = None,
-    quality: Annotated[
-        Optional[int],
-        "JPEG quality (5-95); lower values drastically reduce payload size.",
-    ] = None,
-    color_mode: Annotated[
-        Optional[Literal["color", "gray", "palette"]],
-        "Color treatment before encoding; palette mode reduces colors to shrink payload size.",
-    ] = None,
-    palette_size: Annotated[
-        Optional[int],
-        "Number of colors when using palette mode (2-256). Defaults to environment setting or 32.",
-    ] = None,
-) -> ToolResponse:
+def screenshot() -> ToolResponse:
     """Capture a screenshot and return its base64 representation along with the image dimensions."""
 
-    payload = {
-        "region": list(region) if region is not None else None,
-        "quality": quality,
-        "color_mode": color_mode,
-        "palette_size": palette_size,
-    }
-    with _tool_debug_context("desktop_capture_screenshot", payload) as debug_ctx:
-        normalized_region = _normalize_region(region)
+    with _tool_debug_context("desktop_capture_screenshot", {}) as debug_ctx:
         try:
-            screenshot_image = pyautogui.screenshot(region=normalized_region)
+            screenshot_image = pyautogui.screenshot()
         except Exception as exc:  # noqa: BLE001
             raise RuntimeError(
                 "Unable to capture a screenshot. Ensure Pillow and PyScreeze are installed "
                 "(try `pip install pillow pyscreeze`)."
             ) from exc
-
+        screen_width, screen_height = pyautogui.size()
         screenshot_width, screenshot_height = screenshot_image.size
-        mode_to_use = (color_mode or _default_color_mode).lower()
-        quality_to_use = quality if quality is not None else _default_image_quality
-        palette_to_use = palette_size
+        if (screenshot_width, screenshot_height) != (screen_width, screen_height):
+            try:
+                screenshot_image = screenshot_image.resize(
+                    (screen_width, screen_height), Image.Resampling.LANCZOS
+                )
+                screenshot_width, screenshot_height = screenshot_image.size
+            except Exception:  # noqa: BLE001
+                pass
+        mode_to_use = _default_color_mode
+        quality_to_use = _default_image_quality
+        palette_to_use: Optional[int] = None
 
         screenshot_b64 = _encode_image_to_base64(
             screenshot_image,
@@ -844,15 +853,11 @@ def screenshot(
         timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
 
         summary_parts: list[str] = []
-        if region is not None:
-            left, top, width, height = normalized_region
-            summary_parts.append(f"region=({left}, {top}, {width}, {height})")
-
-        quality_logged = max(5, min(95, int(quality_to_use)))
+        quality_logged = max(5, min(95, int(_default_image_quality)))
         summary_parts.append(f"mode={mode_to_use}")
         summary_parts.append(f"quality={quality_logged}")
         if mode_to_use == "palette":
-            palette_detail = palette_size if palette_size is not None else _default_palette_size
+            palette_detail = _default_palette_size
             summary_parts.append(f"palette={palette_detail}")
 
         details_str = "; ".join(summary_parts)
@@ -868,24 +873,16 @@ def screenshot(
             dimensions=(screenshot_width, screenshot_height),
         )
 
-        _debug_store_screenshot(
-            response["screenshot"],
-            "desktop_capture_screenshot",
-            metadata={
-                "width": screenshot_width,
-                "height": screenshot_height,
-                "mode": mode_to_use,
-                "quality": quality_logged,
-                "palette": (
-                    palette_size if palette_size is not None else _default_palette_size
-                )
-                if mode_to_use == "palette"
-                else None,
-                "region": normalized_region,
-            },
-        )
+        debug_metadata = {
+            "width": screenshot_width,
+            "height": screenshot_height,
+            "mode": mode_to_use,
+            "quality": quality_logged,
+            "palette": _default_palette_size if mode_to_use == "palette" else None,
+            "region": None,
+        }
 
-        return debug_ctx.finish(response)
+        return debug_ctx.finish(response, metadata=debug_metadata)
 
 
 def run_server() -> None:
